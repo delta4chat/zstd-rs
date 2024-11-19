@@ -1,7 +1,7 @@
 //! Utilities and interfaces for encoding an entire frame.
 
 use alloc::vec::Vec;
-use core::convert::TryInto;
+use core::convert::{TryFrom, TryInto};
 
 use super::{
     block_header::BlockHeader,
@@ -15,32 +15,109 @@ use crate::io::{Read, Write};
 /// Blocks cannot be larger than 128KB in size.
 const MAX_BLOCK_SIZE: usize = 128 * 1024 - 20;
 
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ZstdLevel(u8);
+
+macro_rules! zl_from_int_impls {
+    ($($t:ident)*) => {$(
+        impl TryFrom<$t> for ZstdLevel {
+            type Error = core::num::TryFromIntError;
+            fn try_from(val: $t) -> Result<Self, Self::Error> {
+                let val: u8 = val.try_into()?;
+                if val <= 22 {
+                    Ok(Self(val))
+                } else {
+                    0u8.try_into()
+                }
+            }
+        }
+
+        impl From<ZstdLevel> for $t {
+            fn from(val: ZstdLevel) -> $t {
+                val.0.try_into().unwrap()
+            }
+        }
+    )*};
+}
+
+impl From<CompressionLevel> for ZstdLevel {
+    fn from(val: CompressionLevel) -> Self {
+        match val {
+            CompressionLevel::Uncompressed => Self(0),
+            CompressionLevel::Fastest => Self(1),
+            CompressionLevel::Default => Self(3),
+            CompressionLevel::Better => Self(7),
+            CompressionLevel::Best => Self(11),
+            CompressionLevel::Other(zl) => zl
+        }
+    }
+}
+
+zl_from_int_impls! {
+  u8 u16 u32 u64 u128 usize
+  i8 i16 i32 i64 i128 isize
+}
+
 /// The compression mode used impacts the speed of compression,
 /// and resulting compression ratios. Faster compression will result
 /// in worse compression ratios, and vice versa.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum CompressionLevel {
     /// This level does not compress the data at all, and simply wraps
     /// it in a Zstandard frame.
     Uncompressed,
+
     /// This level is roughly equivalent to Zstd compression level 1
     ///
-    /// UNIMPLEMENTED
+    /// EXPERIMENTAL IMPLEMENTED
     Fastest,
+
     /// This level is roughly equivalent to Zstd level 3,
     /// or the one used by the official compressor when no level
     /// is specified.
     ///
     /// UNIMPLEMENTED
     Default,
+
     /// This level is roughly equivalent to Zstd level 7.
     ///
     /// UNIMPLEMENTED
     Better,
+
     /// This level is roughly equivalent to Zstd level 11.
     ///
     /// UNIMPLEMENTED
     Best,
+
+    /// This level allows to set a custom Zstd level between 0~22.
+    Other(ZstdLevel),
 }
+impl CompressionLevel {
+    pub fn normalize_mut(&mut self) {
+        if let Self::Other(zl) = self {
+            *self = (*zl).into();
+        }
+    }
+    pub fn normalize(&self) -> Self {
+        let mut out = self.clone();
+        out.normalize_mut();
+        out
+    }
+}
+
+impl From<ZstdLevel> for CompressionLevel {
+    fn from(val: ZstdLevel) -> Self {
+        match val.0 {
+            0 => Self::Uncompressed,
+            1 => Self::Fastest,
+            3 => Self::Default,
+            7 => Self::Better,
+            11 => Self::Best,
+            _ => Self::Other(val),
+        }
+    }
+}
+
 /// An interface for compressing arbitrary data with the ZStandard compression algorithm.
 ///
 /// `FrameCompressor` will generally be used by:
@@ -69,8 +146,9 @@ impl<R: Read, W: Write> FrameCompressor<R, W> {
     pub fn new(
         uncompressed_data: R,
         compressed_data: W,
-        compression_level: CompressionLevel,
+        mut compression_level: CompressionLevel,
     ) -> FrameCompressor<R, W> {
+        compression_level.normalize_mut();
         Self {
             uncompressed_data,
             compressed_data,
@@ -185,8 +263,21 @@ impl<R: Read, W: Write> FrameCompressor<R, W> {
                     output.clear();
                 }
             }
-            _ => {
+
+            CompressionLevel::Default => {
                 unimplemented!();
+            }
+
+            CompressionLevel::Better => {
+                unimplemented!();
+            }
+
+            CompressionLevel::Best => {
+                unimplemented!();
+            }
+
+            CompressionLevel::Other(level) => {
+                unimplemented!("zstd level {} is not implemented yet", level.0);
             }
         }
         self.compressed_data.write_all(output).unwrap();
